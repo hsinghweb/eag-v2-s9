@@ -28,7 +28,12 @@ Write a valid async Python function named `solve()` that solves the user query u
 
 - No fallback, no multiple options.
 - No explanation, no narration — only valid Python code.
-- If the user input already includes clean extracted webpage/document content, do NOT call the tool again. Summarize or generate the final answer from it.
+- **CRITICAL**: If the user input contains "Your last tool produced this result:" followed by content, this means:
+  * Content has already been retrieved by a previous tool call
+  * You MUST process this content directly to answer the original task
+  * DO NOT call any tools - the content is already provided
+  * Analyze the content and return FINAL_ANSWER based on the original task
+  * The original task is stated at the beginning of the user input
 
 
 ✅ Example 1: Output of last function parsed for next function
@@ -124,16 +129,31 @@ async def solve():
 
 ```
 
-✅ Example 5: Summarize fetched content
+✅ Example 5: Process content that was already retrieved (NO TOOL CALLS)
 ```python
 async def solve():
-    # FUNCTION_CALL: 1
-    """Search documents to get relevant extracts. Usage: input={{"input": {{"query": "DLF apartment Capbridge"}}}} result = await mcp.call_tool('search_stored_documents', input)"""
-    input = {{"input": {{"query": "DLF apartment Capbridge"}}}}
-    result = await mcp.call_tool('search_stored_documents', input)
+    # The user input contains: "Original user task: [task]\n\nYour last tool produced this result:\n\n[content]"
+    # Content is already provided - process it directly
+    # Extract the content from the user input context (it's already in the prompt)
+    # Based on the original task, analyze and return FINAL_ANSWER
+    
+    # Since content is in the user_input variable, you can reference it
+    # For this example, assume content is available and process it
+    return f"FINAL_ANSWER: [Your analysis/summary/answer based on the provided content and original task]"
 
-    # FURTHER_PROCESSING_REQUIRED
-    return f"FURTHER_PROCESSING_REQUIRED: {{result}}"
+```
+
+✅ Example 6: When content is provided, process it directly
+```python
+async def solve():
+    # User input format: "Original user task: Summarize this page: https://example.com\n\nYour last tool produced this result:\n\n[webpage content here]"
+    # The content is already in the user_input - you don't need to call tools
+    # Process the content according to the original task and return FINAL_ANSWER
+    # DO NOT return FURTHER_PROCESSING_REQUIRED - process the content now
+    
+    # In a real scenario, you would extract and process the content
+    # For this example:
+    return f"FINAL_ANSWER: [Process the provided content to answer the original task]"
 
 ```
 

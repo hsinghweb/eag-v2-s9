@@ -59,16 +59,35 @@ class AgentLoop:
                 # Use user_input_override if available, otherwise use original user_input
                 planning_input = user_input_override or self.context.user_input
 
-                plan = await generate_plan(
-                    user_input=planning_input,
-                    perception=perception,
-                    memory_items=self.context.memory.get_session_items(),
-                    tool_descriptions=tool_descriptions,
-                    prompt_path=prompt_path,
-                    step_num=step + 1,
-                    max_steps=max_steps,
-                )
-                print(f"[plan] {plan}")
+                try:
+                    plan = await generate_plan(
+                        user_input=planning_input,
+                        perception=perception,
+                        memory_items=self.context.memory.get_session_items(),
+                        tool_descriptions=tool_descriptions,
+                        prompt_path=prompt_path,
+                        step_num=step + 1,
+                        max_steps=max_steps,
+                    )
+                    print(f"[plan] {plan}")
+                except ValueError as e:
+                    # Planning failed to generate valid solve() - retry with lifeline
+                    log("loop", f"⚠️ Planning failed: {e}")
+                    lifelines_left -= 1
+                    if lifelines_left < 0:
+                        log("loop", f"⚠️ All lifelines exhausted ({max_lifelines} attempts). Planning failed.")
+                        break
+                    log("loop", f"🛠 Retrying planning... Lifelines left: {lifelines_left}/{max_lifelines}")
+                    continue
+                except Exception as e:
+                    # Other planning errors - retry
+                    log("loop", f"⚠️ Planning error: {e}")
+                    lifelines_left -= 1
+                    if lifelines_left < 0:
+                        log("loop", f"⚠️ All lifelines exhausted ({max_lifelines} attempts). Planning error.")
+                        break
+                    log("loop", f"🛠 Retrying planning after error... Lifelines left: {lifelines_left}/{max_lifelines}")
+                    continue
 
                 # === Execution ===
                 if re.search(r"^\s*(async\s+)?def\s+solve\s*\(", plan, re.MULTILINE):
@@ -97,25 +116,47 @@ class AgentLoop:
                             return {"status": "done", "result": self.context.final_answer}
                         elif result.startswith("FURTHER_PROCESSING_REQUIRED:"):
                             content = result.split("FURTHER_PROCESSING_REQUIRED:")[1].strip()
+                            # Mark as success since FURTHER_PROCESSING_REQUIRED is expected behavior
+                            success = True
+                            self.context.update_subtask_status("solve_sandbox", "success")
+                            self.context.memory.add_tool_output(
+                                tool_name="solve_sandbox",
+                                tool_args={"plan": plan},
+                                tool_result={"result": result},
+                                success=True,
+                                tags=["sandbox", "further_processing"],
+                            )
+                            
                             # Check if we're on the last step - if so, return it to agent.py instead of continuing
                             if step >= max_steps - 1:
                                 log("loop", f"⚠️ FURTHER_PROCESSING_REQUIRED on last step ({step+1}/{max_steps}). Returning to agent.py.")
                                 return {"status": "done", "result": f"FURTHER_PROCESSING_REQUIRED: {content}"}
                             
+                            # Format the override to make it clear content is provided and should be processed
+                            # Truncate very long content to avoid token limits
+                            content_preview = content[:4000] if len(content) > 4000 else content
+                            if len(content) > 4000:
+                                content_preview += f"\n\n[Content truncated - showing first 4000 characters of {len(content)} total]"
+                            
                             self.context.user_input_override  = (
                                 f"Original user task: {self.context.user_input}\n\n"
                                 f"Your last tool produced this result:\n\n"
-                                f"{content}\n\n"
-                                f"If this fully answers the task, return:\n"
-                                f"FINAL_ANSWER: your answer\n\n"
-                                f"Otherwise, return the next FUNCTION_CALL."
+                                f"{content_preview}\n\n"
+                                f"INSTRUCTIONS:\n"
+                                f"- The content above was retrieved by a previous tool call\n"
+                                f"- Process this content directly to answer the original task: {self.context.user_input}\n"
+                                f"- DO NOT call any tools - the content is already provided\n"
+                                f"- Analyze the content and return FINAL_ANSWER based on the original task\n"
+                                f"- DO NOT return FURTHER_PROCESSING_REQUIRED - process the content now"
                             )
                             log("loop", f"📨 Forwarding intermediate result to next step:\n{self.context.user_input_override}\n\n")
                             log("loop", f"🔁 Continuing based on FURTHER_PROCESSING_REQUIRED — Step {step+1}/{max_steps} continues...")
                             break  # Step will continue to next step
                         elif result.startswith("[sandbox error:"):
                             success = False
-                            self.context.final_answer = "FINAL_ANSWER: [Execution failed]"
+                            error_msg = result.replace("[sandbox error:", "").strip().rstrip("]")
+                            self.context.final_answer = f"FINAL_ANSWER: [Execution failed: {error_msg}]"
+                            log("loop", f"⚠️ Sandbox error: {error_msg}")
                         else:
                             success = True
                             self.context.final_answer = f"FINAL_ANSWER: {result}"
@@ -135,16 +176,22 @@ class AgentLoop:
                         tags=["sandbox"],
                     )
 
+                    # Only retry if it's a failure, not if it's FURTHER_PROCESSING_REQUIRED (which already broke above)
                     if success and "FURTHER_PROCESSING_REQUIRED:" not in result:
                         return {"status": "done", "result": self.context.final_answer}
-                    else:
+                    elif not success:
+                        # Only retry on actual failures
                         lifelines_left -= 1
                         if lifelines_left < 0:
                             log("loop", f"⚠️ All lifelines exhausted ({max_lifelines} attempts). Step failed.")
                             # Break from lifeline loop, will continue to next step or fail at max_steps
                             break
-                        log("loop", f"🛠 Retrying... Lifelines left: {lifelines_left}/{max_lifelines}")
+                        log("loop", f"🛠 Retrying after failure... Lifelines left: {lifelines_left}/{max_lifelines}")
                         continue
+                    else:
+                        # This shouldn't happen, but if it does, break
+                        log("loop", "⚠️ Unexpected state - breaking lifeline loop")
+                        break
                 else:
                     lifelines_left -= 1
                     if lifelines_left < 0:
