@@ -168,15 +168,35 @@ class ConversationIndexer:
             
             # Only index if we have both query and answer
             if user_query and final_answer and len(user_query) > 5 and len(final_answer) > 10:
-                # Extract session ID from path or filename
-                session_id = session_file.stem.replace("session-", "")
+                # Extract session ID from path or filename - handle multiple formats
+                session_id = None
+                
+                # Try extracting from filename first
+                if "session-" in session_file.name:
+                    # Handle formats like:
+                    # "session-2025-11-09-session-1762696001-228240.json"
+                    # "session-1762696001-228240.json"
+                    parts = session_file.stem.split("-")
+                    if "session" in parts:
+                        # Find the session part and get everything after it
+                        session_idx = parts.index("session")
+                        if session_idx + 1 < len(parts):
+                            session_id = "-".join(parts[session_idx + 1:])
+                    else:
+                        session_id = session_file.stem.replace("session-", "")
+                
+                # Fallback: extract from path
                 if not session_id:
-                    # Try to extract from path
                     parts = session_file.parts
                     for part in reversed(parts):
                         if "session-" in part:
+                            # Extract the ID part after "session-"
                             session_id = part.replace("session-", "")
                             break
+                
+                # Last resort: use filename
+                if not session_id:
+                    session_id = session_file.stem.replace("session-", "")
                 
                 conversations.append(Conversation(
                     session_id=session_id or "unknown",
@@ -186,6 +206,7 @@ class ConversationIndexer:
                     tools_used=list(set(tools_used)),  # Deduplicate
                     success=success
                 ))
+                log("indexer", f"✅ Extracted conversation: Q='{user_query[:50]}...' A='{final_answer[:50]}...'")
         except Exception as e:
             log("indexer", f"⚠️ Error reading {session_file}: {e}")
         
@@ -215,26 +236,56 @@ class ConversationIndexer:
     
     def index_all_conversations(self, force_rebuild: bool = False):
         """Index all conversations from memory files."""
-        if force_rebuild or self.index is None:
-            log("indexer", "🔍 Scanning memory files for conversations...")
-            session_files = self._scan_memory_files()
-            log("indexer", f"📁 Found {len(session_files)} session files")
+        # Always scan for new files, even if index exists (for incremental updates)
+        log("indexer", "🔍 Scanning memory files for conversations...")
+        session_files = self._scan_memory_files()
+        log("indexer", f"📁 Found {len(session_files)} session files")
+        
+        all_conversations = []
+        indexed_session_ids = set()  # Track what we've already indexed
+        
+        # If index exists, track already indexed sessions
+        if self.index is not None and self.metadata and not force_rebuild:
+            indexed_session_ids = {m.get("session_id") for m in self.metadata if m.get("session_id")}
+            log("indexer", f"📋 Already indexed {len(indexed_session_ids)} sessions")
+        
+        for session_file in session_files:
+            # Extract session ID from path - handle different path formats
+            session_id_from_path = None
             
-            all_conversations = []
-            indexed_session_ids = set()  # Track what we've already indexed
+            # Try to extract from filename first
+            if "session-" in session_file.name:
+                # Extract from filename like "session-2025-11-09-session-1762696001-228240.json"
+                parts = session_file.stem.split("-")
+                if "session" in parts:
+                    # Find the last "session" occurrence and get everything after it
+                    session_indices = [i for i, p in enumerate(parts) if p == "session"]
+                    if session_indices:
+                        last_session_idx = session_indices[-1]
+                        if last_session_idx + 1 < len(parts):
+                            session_id_from_path = "-".join(parts[last_session_idx + 1:])
+                if not session_id_from_path:
+                    session_id_from_path = session_file.stem.replace("session-", "")
+            else:
+                session_id_from_path = session_file.stem
             
-            # If index exists, track already indexed sessions
-            if self.index is not None and self.metadata:
-                indexed_session_ids = {m.get("session_id") for m in self.metadata if m.get("session_id")}
+            # Also try extracting from full path
+            if not session_id_from_path:
+                parts = session_file.parts
+                for part in reversed(parts):
+                    if "session-" in part:
+                        session_id_from_path = part.replace("session-", "")
+                        break
             
-            for session_file in session_files:
-                # Extract session ID from path
-                session_id_from_path = session_file.stem.replace("session-", "")
-                if not force_rebuild and session_id_from_path in indexed_session_ids:
-                    continue  # Skip already indexed
-                    
-                conversations = self._extract_conversations_from_session(session_file)
-                all_conversations.extend(conversations)
+            # Check if already indexed (only for incremental updates)
+            if not force_rebuild and session_id_from_path and session_id_from_path in indexed_session_ids:
+                log("indexer", f"⏭️  Skipping already indexed session: {session_id_from_path}")
+                continue
+                
+            conversations = self._extract_conversations_from_session(session_file)
+            if conversations:
+                log("indexer", f"📝 Extracted {len(conversations)} conversation(s) from {session_file.name}")
+            all_conversations.extend(conversations)
             
             if force_rebuild:
                 # Rebuild from scratch
@@ -362,8 +413,16 @@ def get_conversation_indexer() -> ConversationIndexer:
 def refresh_conversation_index():
     """Manually refresh the conversation index (useful after new conversations)."""
     global _indexer_instance
-    if _indexer_instance is not None:
-        _indexer_instance.index_all_conversations(force_rebuild=False)  # Incremental update
-    else:
-        get_conversation_indexer()  # Will index on creation
+    try:
+        if _indexer_instance is not None:
+            log("indexer", "🔄 Refreshing conversation index (incremental update)...")
+            _indexer_instance.index_all_conversations(force_rebuild=False)  # Incremental update
+            log("indexer", f"✅ Index refresh complete. Total conversations: {len(_indexer_instance.metadata)}")
+        else:
+            log("indexer", "🔄 Creating new conversation index...")
+            get_conversation_indexer()  # Will index on creation
+    except Exception as e:
+        log("indexer", f"⚠️ Error refreshing index: {e}")
+        import traceback
+        traceback.print_exc()
 

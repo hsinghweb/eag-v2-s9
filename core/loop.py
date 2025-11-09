@@ -116,13 +116,22 @@ class AgentLoop:
                             # Save final answer to memory for indexing
                             final_answer_text = result.split("FINAL_ANSWER:")[1].strip() if "FINAL_ANSWER:" in result else result
                             self.context.memory.add_final_answer(final_answer_text)
+                            # Ensure memory is saved before indexing
+                            self.context.memory.save()
+                            
                             # Trigger conversation indexing update (async, non-blocking)
                             try:
                                 from modules.conversation_indexer import refresh_conversation_index
                                 # Refresh index to include this new conversation (incremental update)
+                                # Add a small delay to ensure file is written
+                                import asyncio
+                                await asyncio.sleep(0.1)  # Small delay to ensure file write completes
                                 refresh_conversation_index()
+                                log("loop", "✅ Conversation index refreshed")
                             except Exception as e:
                                 log("loop", f"⚠️ Could not update conversation index: {e}")
+                                import traceback
+                                traceback.print_exc()
                             return {"status": "done", "result": self.context.final_answer}
                         elif result.startswith("FURTHER_PROCESSING_REQUIRED:"):
                             content = result.split("FURTHER_PROCESSING_REQUIRED:")[1].strip()
