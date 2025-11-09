@@ -3,6 +3,7 @@ from modules.perception import PerceptionResult
 from modules.memory import MemoryItem
 from modules.model_manager import ModelManager
 from modules.tools import load_prompt
+from modules.conversation_indexer import get_conversation_indexer
 import re
 
 # Optional logging fallback
@@ -35,6 +36,18 @@ async def generate_plan(
 
     prompt_template = load_prompt(prompt_path)
     
+    # Get relevant historical conversations
+    historical_context = ""
+    try:
+        indexer = get_conversation_indexer()
+        # Only search if user_input looks like a new query (not already processed content)
+        if "Your last tool produced this result:" not in user_input:
+            historical_context = indexer.get_relevant_context(user_input, top_k=2)
+            if historical_context:
+                log("plan", f"📚 Found {len(historical_context.split('Q:')) - 1} relevant past conversations")
+    except Exception as e:
+        log("plan", f"⚠️ Error getting historical context: {e}")
+    
     # Check if user_input contains content from a previous tool (indicated by "Your last tool produced this result:")
     has_provided_content = "Your last tool produced this result:" in user_input or "CONTENT TO" in user_input.upper()
     
@@ -46,7 +59,13 @@ async def generate_plan(
     prompt = prompt_template.format(
         tool_descriptions=tool_descriptions,
         user_input=user_input
-    ) + content_instruction
+    )
+    
+    # Add historical context and content instruction
+    if historical_context:
+        prompt = f"{prompt}\n\n{historical_context}\n"
+    if content_instruction:
+        prompt = f"{prompt}{content_instruction}"
 
 
     try:

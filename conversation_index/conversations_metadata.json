@@ -1,0 +1,12 @@
+[
+  {
+    "session_id": "1762696001-228240",
+    "user_query": "find top 5 men's cricket tema based on ICC ranking",
+    "final_answer": "Based on the search results, the following URLs likely contain the top 5 men's cricket teams based on ICC ranking: https://www.icc-cricket.com/rankings, https://www.espncricinfo.com/rankings/icc-team-ranking, https://www.cricbuzz.com/cricket-stats/icc-rankings/men/teams",
+    "timestamp": 1762696069.7097275,
+    "tools_used": [
+      "solve_sandbox"
+    ],
+    "success": true
+  }
+]

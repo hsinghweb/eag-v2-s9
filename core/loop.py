@@ -113,6 +113,16 @@ class AgentLoop:
                                 success=True,
                                 tags=["sandbox"],
                             )
+                            # Save final answer to memory for indexing
+                            final_answer_text = result.split("FINAL_ANSWER:")[1].strip() if "FINAL_ANSWER:" in result else result
+                            self.context.memory.add_final_answer(final_answer_text)
+                            # Trigger conversation indexing update (async, non-blocking)
+                            try:
+                                from modules.conversation_indexer import refresh_conversation_index
+                                # Refresh index to include this new conversation (incremental update)
+                                refresh_conversation_index()
+                            except Exception as e:
+                                log("loop", f"⚠️ Could not update conversation index: {e}")
                             return {"status": "done", "result": self.context.final_answer}
                         elif result.startswith("FURTHER_PROCESSING_REQUIRED:"):
                             content = result.split("FURTHER_PROCESSING_REQUIRED:")[1].strip()
