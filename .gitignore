@@ -4,5 +4,8 @@ __pycache__/
 /documents/
 /faiss_index/
 /memory/
+# Conversation indexing files (auto-generated)
 /conversation_index/
+/conversation_index/conversations_metadata.json
+/conversation_index/conversations.index
 
