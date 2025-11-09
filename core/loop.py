@@ -32,6 +32,7 @@ class AgentLoop:
             print(f"🔁 Step {step+1}/{max_steps} starting...")
             self.context.step = step
             lifelines_left = self.context.agent_profile.strategy.max_lifelines_per_step
+            max_lifelines = lifelines_left  # Track original max for logging
 
             while lifelines_left >= 0:
                 # === Perception ===
@@ -44,6 +45,8 @@ class AgentLoop:
                 selected_tools = self.mcp.get_tools_from_servers(selected_servers)
                 if not selected_tools:
                     log("loop", "⚠️ No tools selected — aborting step.")
+                    if lifelines_left <= 0:
+                        log("loop", f"⚠️ No lifelines left ({max_lifelines} attempts exhausted). Moving to next step or failing.")
                     break
 
                 # === Planning ===
@@ -53,8 +56,11 @@ class AgentLoop:
                     exploration_mode=self.context.agent_profile.strategy.exploration_mode,
                 )
 
+                # Use user_input_override if available, otherwise use original user_input
+                planning_input = user_input_override or self.context.user_input
+
                 plan = await generate_plan(
-                    user_input=self.context.user_input,
+                    user_input=planning_input,
                     perception=perception,
                     memory_items=self.context.memory.get_session_items(),
                     tool_descriptions=tool_descriptions,
@@ -77,6 +83,9 @@ class AgentLoop:
                         if result.startswith("FINAL_ANSWER:"):
                             success = True
                             self.context.final_answer = result
+                            # Clear user_input_override since we got a final answer
+                            if hasattr(self.context, "user_input_override"):
+                                delattr(self.context, "user_input_override")
                             self.context.update_subtask_status("solve_sandbox", "success")
                             self.context.memory.add_tool_output(
                                 tool_name="solve_sandbox",
@@ -88,6 +97,11 @@ class AgentLoop:
                             return {"status": "done", "result": self.context.final_answer}
                         elif result.startswith("FURTHER_PROCESSING_REQUIRED:"):
                             content = result.split("FURTHER_PROCESSING_REQUIRED:")[1].strip()
+                            # Check if we're on the last step - if so, return it to agent.py instead of continuing
+                            if step >= max_steps - 1:
+                                log("loop", f"⚠️ FURTHER_PROCESSING_REQUIRED on last step ({step+1}/{max_steps}). Returning to agent.py.")
+                                return {"status": "done", "result": f"FURTHER_PROCESSING_REQUIRED: {content}"}
+                            
                             self.context.user_input_override  = (
                                 f"Original user task: {self.context.user_input}\n\n"
                                 f"Your last tool produced this result:\n\n"
@@ -97,8 +111,8 @@ class AgentLoop:
                                 f"Otherwise, return the next FUNCTION_CALL."
                             )
                             log("loop", f"📨 Forwarding intermediate result to next step:\n{self.context.user_input_override}\n\n")
-                            log("loop", f"🔁 Continuing based on FURTHER_PROCESSING_REQUIRED — Step {step+1} continues...")
-                            break  # Step will continue
+                            log("loop", f"🔁 Continuing based on FURTHER_PROCESSING_REQUIRED — Step {step+1}/{max_steps} continues...")
+                            break  # Step will continue to next step
                         elif result.startswith("[sandbox error:"):
                             success = False
                             self.context.final_answer = "FINAL_ANSWER: [Execution failed]"
@@ -125,13 +139,42 @@ class AgentLoop:
                         return {"status": "done", "result": self.context.final_answer}
                     else:
                         lifelines_left -= 1
-                        log("loop", f"🛠 Retrying... Lifelines left: {lifelines_left}")
+                        if lifelines_left < 0:
+                            log("loop", f"⚠️ All lifelines exhausted ({max_lifelines} attempts). Step failed.")
+                            # Break from lifeline loop, will continue to next step or fail at max_steps
+                            break
+                        log("loop", f"🛠 Retrying... Lifelines left: {lifelines_left}/{max_lifelines}")
                         continue
                 else:
-                    log("loop", f"⚠️ Invalid plan detected — retrying... Lifelines left: {lifelines_left-1}")
                     lifelines_left -= 1
+                    if lifelines_left < 0:
+                        log("loop", f"⚠️ All lifelines exhausted ({max_lifelines} attempts). Invalid plan step failed.")
+                        # Break from lifeline loop, will continue to next step or fail at max_steps
+                        break
+                    log("loop", f"⚠️ Invalid plan detected — retrying... Lifelines left: {lifelines_left}/{max_lifelines}")
                     continue
 
         log("loop", "⚠️ Max steps reached without finding final answer.")
-        self.context.final_answer = "FINAL_ANSWER: [Max steps reached]"
-        return {"status": "done", "result": self.context.final_answer}
+        # Check if we have pending FURTHER_PROCESSING_REQUIRED
+        user_input_override = getattr(self.context, "user_input_override", None)
+        if user_input_override:
+            # Return the override as FURTHER_PROCESSING_REQUIRED for agent.py to handle
+            # Extract the content from the override (it contains the tool result)
+            # The override format is: "Original user task: ...\n\nYour last tool produced this result:\n\n{content}\n\n..."
+            marker = "Your last tool produced this result:\n\n"
+            if marker in user_input_override:
+                # Extract content between marker and next \n\n
+                start_idx = user_input_override.find(marker) + len(marker)
+                end_idx = user_input_override.find("\n\n", start_idx)
+                if end_idx != -1:
+                    content = user_input_override[start_idx:end_idx].strip()
+                else:
+                    # No next \n\n, take rest of string
+                    content = user_input_override[start_idx:].strip()
+            else:
+                # Fallback: use the whole override
+                content = user_input_override
+            return {"status": "done", "result": f"FURTHER_PROCESSING_REQUIRED: {content}"}
+        else:
+            self.context.final_answer = "FINAL_ANSWER: [Max steps reached]"
+            return {"status": "done", "result": self.context.final_answer}

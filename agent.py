@@ -36,7 +36,11 @@ async def main():
                 current_session = None
                 continue
 
-            while True:
+            max_iterations = 10  # Maximum number of iterations to prevent infinite loops
+            iteration_count = 0
+            
+            while iteration_count < max_iterations:
+                iteration_count += 1
                 context = AgentContext(
                     user_input=user_input,
                     session_id=current_session,
@@ -55,8 +59,12 @@ async def main():
                         print(f"\n💡 Final Answer: {answer.split('FINAL_ANSWER:')[1].strip()}")
                         break
                     elif "FURTHER_PROCESSING_REQUIRED:" in answer:
+                        if iteration_count >= max_iterations:
+                            print(f"\n⚠️ Maximum iterations ({max_iterations}) reached. Stopping to prevent infinite loop.")
+                            print(f"💡 Last result: {answer.split('FURTHER_PROCESSING_REQUIRED:')[1].strip()[:200]}...")
+                            break
                         user_input = answer.split("FURTHER_PROCESSING_REQUIRED:")[1].strip()
-                        print(f"\n🔁 Further Processing Required: {user_input}")
+                        print(f"\n🔁 Further Processing Required (iteration {iteration_count}/{max_iterations}): {user_input[:100]}...")
                         continue  # 🧠 Re-run agent with updated input
                     else:
                         print(f"\n💡 Final Answer (raw): {answer}")
@@ -64,6 +72,8 @@ async def main():
                 else:
                     print(f"\n💡 Final Answer (unexpected): {result}")
                     break
+            else:
+                print(f"\n⚠️ Maximum iterations ({max_iterations}) reached. Agent loop stopped to prevent infinite execution.")
     except KeyboardInterrupt:
         print("\n👋 Received exit signal. Shutting down...")
 
