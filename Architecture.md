@@ -505,7 +505,7 @@ flowchart TD
     Init --> LoadConfig[Load profiles.yaml]
     LoadConfig --> CreateContext[Create AgentContext]
     CreateContext --> CreateLoop[Create AgentLoop]
-    CreateLoop --> StepLoop{For each step<br/>max_steps}
+    CreateLoop --> StepLoop{For each step max_steps}
     
     StepLoop --> Perception[Perception Phase]
     Perception --> LoadPerceptionPrompt[Load perception_prompt.txt]
@@ -514,7 +514,7 @@ flowchart TD
     ParsePerception --> SelectServers[Extract selected_servers]
     
     SelectServers --> GetTools[MultiMCP.get_tools_from_servers]
-    GetTools --> CheckTools{Tools<br/>Available?}
+    GetTools --> CheckTools{Tools Available?}
     CheckTools -->|No| Abort[Abort Step]
     CheckTools -->|Yes| Planning[Planning Phase]
     
@@ -523,21 +523,21 @@ flowchart TD
     SummarizeTools --> LoadDecisionPrompt[Load decision_prompt_*.txt]
     LoadDecisionPrompt --> CallLLM2[ModelManager.generate_text]
     CallLLM2 --> ExtractCode[Extract solve function]
-    ExtractCode --> ValidateCode{Valid<br/>solve?}
+    ExtractCode --> ValidateCode{Valid solve?}
     
-    ValidateCode -->|No| RetryLifeline{Lifelines<br/>Left?}
+    ValidateCode -->|No| RetryLifeline{Lifelines Left?}
     ValidateCode -->|Yes| Action[Action Phase]
     
     Action --> Sandbox[run_python_sandbox]
     Sandbox --> ExecuteCode[Execute solve in sandbox]
-    ExecuteCode --> ToolCall{Tool Call<br/>in solve?}
+    ExecuteCode --> ToolCall{Tool Call in solve?}
     
     ToolCall -->|Yes| RouteMCP[MultiMCP.call_tool]
     RouteMCP --> MCPExec[MCP Server Execution]
     MCPExec --> ReturnResult[Return Tool Result]
     ReturnResult --> Sandbox
     
-    ToolCall -->|No| CheckResult{Result<br/>Type?}
+    ToolCall -->|No| CheckResult{Result Type?}
     CheckResult -->|FINAL_ANSWER| Success[Return Success]
     CheckResult -->|FURTHER_PROCESSING| UpdateInput[Update user_input_override]
     CheckResult -->|Error| RetryLifeline
@@ -690,7 +690,7 @@ graph LR
     E --> F[models.generate_content]
     
     D --> G[requests.post]
-    G --> H[/api/generate]
+    G --> H["/api/generate"]
     
     style A fill:#e1f5ff
     style C fill:#ffe1f5
@@ -736,13 +736,13 @@ graph LR
 
 ```mermaid
 graph TB
-    Agent[Agent Process] -->|stdio| MCP1[MCP Server 1<br/>Math]
-    Agent -->|stdio| MCP2[MCP Server 2<br/>Documents]
-    Agent -->|stdio| MCP3[MCP Server 3<br/>Web Search]
+    Agent[Agent Process] -->|stdio| MCP1["MCP Server 1: Math"]
+    Agent -->|stdio| MCP2["MCP Server 2: Documents"]
+    Agent -->|stdio| MCP3["MCP Server 3: Web Search"]
     
-    MCP1 --> Tools1[Math Tools<br/>Python Sandbox<br/>Shell/SQL]
-    MCP2 --> Tools2[Document Search<br/>PDF Extract<br/>Webpage Convert]
-    MCP3 --> Tools3[DuckDuckGo Search<br/>HTML Download]
+    MCP1 --> Tools1["Math Tools, Python Sandbox, Shell/SQL"]
+    MCP2 --> Tools2["Document Search, PDF Extract, Webpage Convert"]
+    MCP3 --> Tools3["DuckDuckGo Search, HTML Download"]
     
     style Agent fill:#e1f5ff
     style MCP1 fill:#ffe1f5
@@ -818,14 +818,14 @@ graph TB
     
     Types -->|run_metadata| Meta[Session Events]
     Types -->|tool_call| Call[Tool Invocations]
-    Types -->|tool_output| Output[Tool Results<br/>+ Success Status]
+    Types -->|tool_output| Output["Tool Results + Success Status"]
     Types -->|final_answer| Answer[Final Answers]
     
     Memory --> Storage[(JSON Files)]
-    Storage --> Path[memory/YYYY/MM/DD/<br/>session-{id}.json]
+    Storage --> Path["memory/YYYY/MM/DD/session-id.json"]
     
     Memory --> Query[find_recent_successes]
-    Query --> Fallback[Memory Fallback<br/>for Tool Selection]
+    Query --> Fallback["Memory Fallback for Tool Selection"]
     
     style Memory fill:#e1f5ff
     style Storage fill:#fff4e1
