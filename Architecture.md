@@ -136,7 +136,7 @@ sequenceDiagram
 
 ### Core Modules (`core/`)
 
-#### `core/loop.py` (138 lines)
+#### `core/loop.py` (247 lines)
 **Purpose**: Main agent execution loop implementing perception-planning-action cycle
 
 **Key Responsibilities**:
@@ -144,7 +144,9 @@ sequenceDiagram
 - Implements lifeline retry mechanism (`max_lifelines_per_step`)
 - Orchestrates perception, planning, and action phases
 - Handles sandbox execution and result parsing
-- Manages `FURTHER_PROCESSING_REQUIRED` flow
+- Manages `FURTHER_PROCESSING_REQUIRED` flow with `user_input_override`
+- Triggers conversation indexing after final answers
+- Handles `ValueError` from planning for retry logic
 
 **Key Classes**:
 - `AgentLoop`: Main loop controller
@@ -154,11 +156,16 @@ sequenceDiagram
 
 **Flow**:
 1. For each step (up to max_steps):
-   - Run perception to select servers/tools
-   - Generate plan using decision module
+   - Run perception to select servers/tools (uses `user_input_override` if available)
+   - Generate plan using decision module (includes historical context)
    - Execute plan in sandbox
-   - Handle results (FINAL_ANSWER, FURTHER_PROCESSING_REQUIRED, errors)
-   - Retry with lifelines if needed
+   - Handle results:
+     - `FINAL_ANSWER`: Save to memory, trigger conversation indexing, return success
+     - `FURTHER_PROCESSING_REQUIRED`: Update `user_input_override` with formatted content, continue to next step
+     - Errors: Retry with lifelines or abort
+   - Retry with lifelines if planning fails (catches `ValueError` for invalid `solve()` functions)
+
+**Conversation Indexing**: After each `FINAL_ANSWER`, saves memory, waits briefly, then triggers incremental conversation index update
 
 ---
 
@@ -257,23 +264,31 @@ sequenceDiagram
 
 ---
 
-#### `modules/decision.py` (64 lines)
-**Purpose**: Plan generation using LLM
+#### `modules/decision.py` (133 lines)
+**Purpose**: Plan generation using LLM with historical context
 
 **Key Functions**:
 - `generate_plan()`: Generates `solve()` function code using LLM
 
 **Process**:
 1. Loads decision prompt template (based on strategy)
-2. Formats prompt with tool descriptions and user input
-3. Calls LLM to generate Python `solve()` function
-4. Extracts code from markdown code blocks if needed
-5. Validates that `solve()` function exists
-6. Returns plan or error fallback
+2. Retrieves relevant historical conversations from `ConversationIndexer` (semantic search)
+3. Formats prompt with tool descriptions, user input, and historical context
+4. Detects if user input contains pre-fetched content (indicated by "Your last tool produced this result:")
+5. Adds instructions to process provided content directly without calling tools
+6. Calls LLM to generate Python `solve()` function
+7. Extracts code from markdown code blocks (handles various formats)
+8. Validates that `solve()` function exists (raises `ValueError` if invalid, triggering retry)
+9. Returns plan or raises error for retry
 
 **Output Format**: Python async function `async def solve():` that:
 - Calls tools via `await mcp.call_tool(tool_name, input_dict)`
 - Returns `FINAL_ANSWER: ...` or `FURTHER_PROCESSING_REQUIRED: ...`
+
+**Features**:
+- **Historical Context**: Includes relevant past conversations in planning prompt
+- **Content Detection**: Automatically detects when content is already provided and instructs LLM to process it directly
+- **Robust Extraction**: Handles various LLM output formats, can extract `solve()` from embedded text, and can rename functions to `solve()` as fallback
 
 ---
 
@@ -313,6 +328,44 @@ sequenceDiagram
 
 ---
 
+#### `modules/conversation_indexer.py` (429 lines)
+**Purpose**: Semantic indexing and search of historical conversations
+
+**Key Classes**:
+- `Conversation`: Dataclass representing a historical conversation
+  - `session_id`: str
+  - `user_query`: str
+  - `final_answer`: str
+  - `timestamp`: float
+  - `tools_used`: List[str]
+  - `success`: bool
+- `ConversationIndexer`: Manages FAISS-based conversation index
+
+**Key Methods**:
+- `_get_embedding()`: Generates embeddings using configured LLM (Ollama/Gemini) or hash-based fallback
+- `_load_index()` / `_save_index()`: Persists FAISS index and metadata
+- `_extract_conversations_from_session()`: Parses session JSON files to extract `Conversation` objects
+- `_scan_memory_files()`: Recursively scans `memory/` directory for session files
+- `index_all_conversations()`: Builds or incrementally updates the FAISS index
+- `search()`: Performs semantic search on indexed conversations
+- `get_relevant_context()`: Formats search results for LLM prompts
+
+**Process**:
+1. Scans `memory/` directory for session JSON files
+2. Extracts conversations (user query + final answer pairs) from memory files
+3. Generates embeddings for each conversation using configured embedding model
+4. Stores embeddings in FAISS index with metadata
+5. Performs incremental updates (only indexes new sessions)
+6. Provides semantic search to find relevant past conversations
+
+**Storage**: 
+- `conversation_index/conversations.index`: FAISS index file
+- `conversation_index/conversations_metadata.json`: Conversation metadata
+
+**Integration**: Used by `modules/decision.py` to provide historical context in planning prompts
+
+---
+
 #### `modules/model_manager.py` (60 lines)
 **Purpose**: LLM abstraction layer
 
@@ -327,11 +380,17 @@ sequenceDiagram
 - Loads model config from `config/models.json`
 - Loads active model from `config/profiles.yaml` → `llm.text_generation`
 - Supports API key from environment variables
+- Also used for embeddings (`llm.embedding`) by `ConversationIndexer`
 
 **Key Methods**:
 - `generate_text()`: Async text generation (routes to provider-specific method)
 - `_gemini_generate()`: Gemini API call
 - `_ollama_generate()`: Ollama HTTP POST request
+
+**Usage**:
+- **Perception**: Text generation for intent understanding
+- **Planning**: Text generation for `solve()` function creation
+- **Conversation Indexing**: Embedding generation for semantic search (via `ConversationIndexer`)
 
 ---
 
@@ -348,6 +407,18 @@ sequenceDiagram
 - `tool_output`: Tool result logs (with success/failure)
 - `final_answer`: Final answers
 
+**MemoryItem Fields**:
+- `timestamp`: float
+- `type`: str (run_metadata | tool_call | tool_output | final_answer)
+- `text`: str (human-readable description)
+- `tool_name`: Optional[str]
+- `tool_args`: Optional[dict]
+- `tool_result`: Optional[dict]
+- `final_answer`: Optional[str]
+- `tags`: Optional[List[str]]
+- `success`: Optional[bool] (key for fallback logic)
+- `metadata`: Optional[dict] (includes `user_query` and `session_id` for conversation indexing)
+
 **Key Methods**:
 - `add()`: Adds memory item and saves to disk
 - `add_tool_call()`: Logs tool invocation
@@ -357,6 +428,8 @@ sequenceDiagram
 - `get_session_items()`: Returns all items for current session
 
 **Storage**: JSON files in `memory/YYYY/MM/DD/session-{id}.json`
+
+**Conversation Indexing**: Memory items include `user_query` and `session_id` in metadata for automatic conversation indexing
 
 ---
 
@@ -705,12 +778,21 @@ graph LR
    - **Model**: Configured in `profiles.yaml` → `llm.text_generation`
 
 2. **Planning** (`modules/decision.py`)
-   - **Input**: Tool descriptions + user query + memory items
+   - **Input**: Tool descriptions + user query + memory items + historical context
    - **Output**: Python `solve()` function code
    - **Model**: Same as perception
    - **Prompt Selection**: Based on `strategy.planning_mode` and `strategy.exploration_mode`
+   - **Historical Context**: Includes top-K relevant past conversations from `ConversationIndexer`
+   - **Content Detection**: Automatically detects pre-fetched content and instructs LLM to process it directly
 
-3. **Document Chunking** (`mcp_server_2.py`)
+3. **Conversation Indexing** (`modules/conversation_indexer.py`)
+   - **Input**: Memory files from `memory/` directory
+   - **Output**: FAISS index with conversation embeddings
+   - **Embedding Model**: Configured in `profiles.yaml` → `llm.embedding` (default: nomic)
+   - **Process**: Extracts conversations, generates embeddings, stores in FAISS index
+   - **Embedding Generation**: Uses `ModelManager` to generate embeddings for conversation text (user query + final answer)
+
+4. **Document Chunking** (`mcp_server_2.py`)
    - **Input**: Chunk pairs for relatedness check
    - **Output**: Yes/No for chunk merging
    - **Model**: phi4 (Ollama) for chunking decisions
@@ -842,10 +924,11 @@ MemoryItem:
   - tool_name: Optional[str]
   - tool_args: Optional[dict]
   - tool_result: Optional[dict]
+  - final_answer: Optional[str]
   - success: Optional[bool]  # Key for fallback logic
-  - tags: List[str]
-  - metadata: dict
-  - session_id: str
+  - tags: Optional[List[str]]
+  - metadata: Optional[dict]  # Includes user_query and session_id for indexing
+  - session_id: str (implicit, from file path)
 ```
 
 ### Memory Usage
@@ -853,7 +936,39 @@ MemoryItem:
 1. **Session Tracking**: All interactions logged per session
 2. **Tool Success Tracking**: Success/failure status for each tool call
 3. **Memory Fallback**: Failed planning can use recently successful tools
-4. **Context for LLMs**: Memory items can be included in prompts (future enhancement)
+4. **Conversation Indexing**: Memory files are automatically scanned and indexed for semantic search
+5. **Historical Context**: Relevant past conversations are included in planning prompts
+
+### Conversation Indexing System
+
+**Purpose**: Enables the agent to learn from past interactions by providing relevant historical context.
+
+**Architecture**:
+
+```mermaid
+graph TB
+    Memory[Memory Files] --> Extract[Extract Conversations]
+    Extract --> Embed[Generate Embeddings]
+    Embed --> FAISS[FAISS Index]
+    FAISS --> Search[Semantic Search]
+    Search --> Context[Historical Context]
+    Context --> Planning[Planning Prompt]
+    
+    NewQuery[New User Query] --> EmbedQuery[Embed Query]
+    EmbedQuery --> Search
+    
+    style Memory fill:#e1f5ff
+    style FAISS fill:#fff4e1
+    style Context fill:#ffe1f5
+    style Planning fill:#e1ffe1
+```
+
+**Features**:
+- **Automatic Indexing**: Conversations are indexed incrementally after each interaction
+- **Semantic Search**: Uses FAISS vector similarity search to find relevant past conversations
+- **Context Injection**: Top-K relevant conversations are included in planning prompts
+- **Incremental Updates**: Only new sessions are indexed, avoiding full rebuilds
+- **Robust Extraction**: Handles various memory file formats and naming conventions
 
 ---
 
@@ -881,6 +996,7 @@ graph TD
     decision --> tools
     decision --> strategy
     decision --> memory[modules/memory.py]
+    decision --> indexer[modules/conversation_indexer.py]
     
     action --> session
     action --> tools
@@ -906,6 +1022,9 @@ graph TD
     decision --> prompts1[prompts/decision_prompt_*.txt]
     perception --> prompts2[prompts/perception_prompt.txt]
     
+    loop --> indexer
+    memory --> indexer
+    
     style agent fill:#ff6b6b
     style loop fill:#4ecdc4
     style model fill:#ffe66d
@@ -928,6 +1047,9 @@ graph LR
     MCP --> Tools[Tool List]
     
     Tools --> D[Decision]
+    D --> Indexer[ConversationIndexer]
+    Indexer --> Context[Historical Context]
+    Context --> D
     D --> LLM2[LLM]
     LLM2 --> Plan[Python Plan]
     
@@ -940,6 +1062,9 @@ graph LR
     Result --> M[Memory]
     
     Loop --> Answer[Final Answer]
+    Answer --> M
+    M --> Indexer
+    Indexer --> Update[Update Index]
     Answer --> User
     
     style Context fill:#e1f5ff
@@ -999,6 +1124,9 @@ MCP servers are stateless - each call is independent.
 ### 6. **Memory Pattern**
 Session memory persists across steps for context and fallback.
 
+### 7. **Conversation Indexing Pattern**
+Historical conversations are semantically indexed and searched to provide relevant context for new queries.
+
 ---
 
 ## Error Handling & Resilience
@@ -1013,8 +1141,11 @@ Session memory persists across steps for context and fallback.
 
 1. **Perception Errors**: Fallback to all servers
 2. **Planning Errors**: Retry with lifelines or memory fallback
+   - `ValueError` from invalid `solve()` generation triggers automatic retry
+   - Enhanced code extraction handles various LLM output formats
 3. **Execution Errors**: Caught in sandbox, returned as error string
 4. **Tool Errors**: Propagated through MCP, handled in sandbox
+5. **Indexing Errors**: Conversation indexing failures are logged but don't block agent execution
 
 ---
 
@@ -1025,10 +1156,11 @@ Session memory persists across steps for context and fallback.
 1. **Persistent MCP Sessions**: Reduce latency with connection pooling
 2. **Streaming Responses**: Real-time LLM output streaming
 3. **Multi-Model Support**: Use different models for perception vs planning
-4. **Enhanced Memory**: Semantic search over memory items
+4. **Enhanced Memory**: Semantic search over memory items (✅ **Implemented**: Conversation indexing)
 5. **Tool Caching**: Cache tool results for repeated queries
 6. **Parallel Tool Execution**: Execute independent tools concurrently
 7. **Web UI**: Browser-based interface for agent interaction
+8. **Conversation Indexing**: ✅ **Implemented** - Semantic search over historical conversations
 
 ---
 
@@ -1047,4 +1179,11 @@ The architecture supports complex multi-step reasoning tasks while maintaining c
 ---
 
 *Document generated for Cortex-R Agent v0.1.0*
+
+**Recent Updates**:
+- ✅ Added conversation indexing system for learning from past interactions
+- ✅ Enhanced planning with historical context integration
+- ✅ Improved error handling with `ValueError` retry mechanism
+- ✅ Robust code extraction for various LLM output formats
+- ✅ Automatic conversation indexing after each interaction
 
